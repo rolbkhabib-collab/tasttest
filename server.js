@@ -33,15 +33,15 @@ const sites = {
     }
 };
 
-// دالة استخراج الرابط - معدلة للـ Render
+// دالة استخراج الرابط - معدلة لـ Railway
 async function extractDownloadLink(fullUrl, referer, site) {
     console.log('🚀 Starting bypass for:', fullUrl, 'Site:', site);
     
     let browser;
     try {
-        // إعدادات Puppeteer للـ Render
+        // إعدادات Puppeteer لـ Railway
         const browserConfig = {
-            headless: true, // دائماً headless في السيرفر
+            headless: true,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -49,15 +49,13 @@ async function extractDownloadLink(fullUrl, referer, site) {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
+                '--single-process',
                 '--disable-gpu',
-                '--single-process'
-            ]
+                '--remote-debugging-port=0',
+                '--disable-features=VizDisplayCompositor'
+            ],
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
         };
-
-        // إذا كان في Render، أضف إعدادات إضافية
-        if (process.env.RENDER) {
-            browserConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-        }
 
         browser = await puppeteer.launch(browserConfig);
         const page = await browser.newPage();
@@ -65,23 +63,35 @@ async function extractDownloadLink(fullUrl, referer, site) {
         // إعدادات الصفحة
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({
-            'Referer': referer
+            'Referer': referer,
+            'Accept-Language': 'en-US,en;q=0.9'
         });
 
+        // إخفاء WebDriver
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'chrome', { get: () => undefined });
         });
 
         console.log('🌐 Navigating to:', fullUrl);
         
-        await page.goto(fullUrl, {
-            waitUntil: 'networkidle0',
-            timeout: 30000
-        });
+        // الانتقال للصفحة مع معالجة أخطاء محسنة
+        try {
+            await page.goto(fullUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 30000
+            });
+        } catch (navError) {
+            console.log('⚠️ Navigation timeout, continuing...');
+        }
 
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        // انتظار ذكي بناءً على الموقع
+        const waitTime = site === 'linkjust' ? 8000 : 5000;
+        console.log(`⏳ Waiting ${waitTime}ms for ${site}...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
         
         // استخراج الرابط
+        console.log('🔍 Extracting download link...');
         const downloadUrl = await page.evaluate(() => {
             const elements = document.querySelectorAll('button, a, div, span');
             
@@ -92,15 +102,20 @@ async function extractDownloadLink(fullUrl, referer, site) {
                              text.includes('getlink') || 
                              text.includes('download'))) {
                     
+                    // إذا كان رابط مباشر
                     if (element.href && element.href.includes('http')) {
                         return element.href;
                     }
-                    
+                    // إذا كان لديه onclick
                     if (element.getAttribute('onclick')) {
                         const onclick = element.getAttribute('onclick');
                         const urlMatch = onclick.match(/window\.open\('([^']+)'\)/) || 
                                        onclick.match(/location\.href=['"]([^'"]+)['"]/);
                         if (urlMatch) return urlMatch[1];
+                    }
+                    // إذا كان لديه data-url
+                    if (element.getAttribute('data-url')) {
+                        return element.getAttribute('data-url');
                     }
                 }
             }
@@ -111,12 +126,31 @@ async function extractDownloadLink(fullUrl, referer, site) {
             console.log('✅ Download URL found:', downloadUrl);
         } else {
             console.log('❌ Download URL not found');
+            
+            // محاولة ثانية بعد انتظار إضافي
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const secondAttempt = await page.evaluate(() => {
+                const links = document.querySelectorAll('a[href]');
+                for (let link of links) {
+                    const href = link.getAttribute('href');
+                    if (href && href.includes('http') && 
+                        (link.textContent.includes('Download') || link.textContent.includes('Get Link'))) {
+                        return href;
+                    }
+                }
+                return null;
+            });
+            
+            if (secondAttempt) {
+                console.log('✅ Download URL found in second attempt:', secondAttempt);
+                return secondAttempt;
+            }
         }
 
         return downloadUrl;
 
     } catch (error) {
-        console.error('💥 Error:', error.message);
+        console.error('💥 Error in extractDownloadLink:', error.message);
         return null;
     } finally {
         if (browser) {
@@ -131,7 +165,6 @@ app.post('/api/bypass', async (req, res) => {
 
     console.log('📥 Received request - Site:', site, 'Path:', urlPath);
 
-    // التحقق من البيانات
     if (!site || !urlPath) {
         return res.status(400).json({ 
             success: false, 
@@ -160,19 +193,20 @@ app.post('/api/bypass', async (req, res) => {
                 success: true,
                 originalUrl: fullUrl,
                 downloadUrl: downloadUrl,
-                site: site
+                site: site,
+                message: 'تم العثور على الرابط بنجاح'
             });
         } else {
             res.status(404).json({ 
                 success: false, 
-                error: 'Download link not found' 
+                error: 'لم يتم العثور على رابط التحميل' 
             });
         }
     } catch (error) {
         console.error('💥 Error in API:', error.message);
         res.status(500).json({ 
             success: false, 
-            error: 'Internal server error' 
+            error: 'خطأ في الخادم' 
         });
     }
 });
@@ -182,12 +216,28 @@ app.get('/', (req, res) => {
     res.sendFile(join(__dirname, 'public', 'index.html'));
 });
 
-// health check endpoint
+// health check endpoint مهم لـ Railway
 app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date().toISOString() });
+    res.json({ 
+        status: 'OK', 
+        service: 'URL Bypass API',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'production',
+        version: '1.0.0'
+    });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+    res.status(404).json({ 
+        success: false, 
+        error: 'Endpoint not found' 
+    });
 });
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'production'}`);
+    console.log('✅ Ready for Railway deployment');
+    console.log(`📊 Health check: http://localhost:${PORT}/health`);
 });
