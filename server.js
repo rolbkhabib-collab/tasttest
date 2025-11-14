@@ -33,16 +33,22 @@ const sites = {
     }
 };
 
-// دالة استخراج الرابط - معدلة لـ Railway
+// دالة استخراج الرابط - linkjust يفتح المتصفح
 async function extractDownloadLink(fullUrl, referer, site) {
     console.log('🚀 Starting bypass for:', fullUrl, 'Site:', site);
     
     let browser;
     try {
-        // إعدادات Puppeteer لـ Railway
+        // إعدادات Puppeteer - linkjust فقط يفتح نافذة
+        const headlessMode = site === 'linkjust' ? false : true;
+        
+        console.log(`🎯 Headless mode for ${site}: ${headlessMode}`);
+        
         const browserConfig = {
-            headless: true,
+            headless: headlessMode,
+            defaultViewport: null,
             args: [
+                '--start-maximized',
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
@@ -86,7 +92,7 @@ async function extractDownloadLink(fullUrl, referer, site) {
         }
 
         // انتظار ذكي بناءً على الموقع
-        const waitTime = site === 'linkjust' ? 8000 : 5000;
+        const waitTime = site === 'linkjust' ? 10000 : 6000;
         console.log(`⏳ Waiting ${waitTime}ms for ${site}...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         
@@ -100,7 +106,8 @@ async function extractDownloadLink(fullUrl, referer, site) {
                 
                 if (text && (text.includes('get link') || 
                              text.includes('getlink') || 
-                             text.includes('download'))) {
+                             text.includes('download') ||
+                             text.includes('تحميل'))) {
                     
                     // إذا كان رابط مباشر
                     if (element.href && element.href.includes('http')) {
@@ -110,7 +117,8 @@ async function extractDownloadLink(fullUrl, referer, site) {
                     if (element.getAttribute('onclick')) {
                         const onclick = element.getAttribute('onclick');
                         const urlMatch = onclick.match(/window\.open\('([^']+)'\)/) || 
-                                       onclick.match(/location\.href=['"]([^'"]+)['"]/);
+                                       onclick.match(/location\.href=['"]([^'"]+)['"]/) ||
+                                       onclick.match(/window\.location=['"]([^'"]+)['"]/);
                         if (urlMatch) return urlMatch[1];
                     }
                     // إذا كان لديه data-url
@@ -125,17 +133,29 @@ async function extractDownloadLink(fullUrl, referer, site) {
         if (downloadUrl) {
             console.log('✅ Download URL found:', downloadUrl);
         } else {
-            console.log('❌ Download URL not found');
+            console.log('❌ Download URL not found - trying second attempt');
             
             // محاولة ثانية بعد انتظار إضافي
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            await new Promise(resolve => setTimeout(resolve, 4000));
             const secondAttempt = await page.evaluate(() => {
-                const links = document.querySelectorAll('a[href]');
-                for (let link of links) {
-                    const href = link.getAttribute('href');
-                    if (href && href.includes('http') && 
-                        (link.textContent.includes('Download') || link.textContent.includes('Get Link'))) {
-                        return href;
+                // استراتيجية أوسع للبحث
+                const selectors = [
+                    'a[href*="download"]',
+                    'button',
+                    '[onclick]',
+                    '[data-url]',
+                    '.btn',
+                    '.button'
+                ];
+                
+                for (let selector of selectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (let element of elements) {
+                        const text = element.textContent?.trim().toLowerCase();
+                        if (text && (text.includes('get link') || text.includes('download'))) {
+                            if (element.href) return element.href;
+                            if (element.getAttribute('data-url')) return element.getAttribute('data-url');
+                        }
                     }
                 }
                 return null;
@@ -163,7 +183,8 @@ async function extractDownloadLink(fullUrl, referer, site) {
 app.post('/api/bypass', async (req, res) => {
     const { site, urlPath } = req.body;
 
-    console.log('📥 Received request - Site:', site, 'Path:', urlPath);
+    console.log('\n📥 === NEW REQUEST ===');
+    console.log('📥 Site:', site, 'Path:', urlPath);
 
     if (!site || !urlPath) {
         return res.status(400).json({ 
@@ -189,6 +210,7 @@ app.post('/api/bypass', async (req, res) => {
         const downloadUrl = await extractDownloadLink(fullUrl, siteInfo.referer, site);
         
         if (downloadUrl) {
+            console.log('🎉 SUCCESS - Sending download URL');
             res.json({
                 success: true,
                 originalUrl: fullUrl,
@@ -197,6 +219,7 @@ app.post('/api/bypass', async (req, res) => {
                 message: 'تم العثور على الرابط بنجاح'
             });
         } else {
+            console.log('💔 FAILED - No download link found');
             res.status(404).json({ 
                 success: false, 
                 error: 'لم يتم العثور على رابط التحميل' 
@@ -216,14 +239,18 @@ app.get('/', (req, res) => {
     res.sendFile(join(__dirname, 'public', 'index.html'));
 });
 
-// health check endpoint مهم لـ Railway
+// health check endpoint
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'OK', 
         service: 'URL Bypass API',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'production',
-        version: '1.0.0'
+        version: '1.0.0',
+        features: {
+            linkjust_visible: true,
+            other_sites_headless: true
+        }
     });
 });
 
@@ -238,6 +265,8 @@ app.use('*', (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'production'}`);
-    console.log('✅ Ready for Railway deployment');
+    console.log('🎯 Special modes:');
+    console.log('   - linkjust: headless: false (يفتح نافذة)');
+    console.log('   - All other sites: headless: true (خفي)');
     console.log(`📊 Health check: http://localhost:${PORT}/health`);
 });
